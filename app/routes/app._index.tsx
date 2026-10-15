@@ -15,12 +15,19 @@ import { SaveBar, useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
+  getOverdueVariants,
   getPreorderCounts,
   listProducts,
   saveVariantsAndSync,
 } from "../preorder.server";
 import type { VariantUpdate } from "../preorder.server";
-import { numericId, parseStatusFilter, preorderStatus } from "../preorder";
+import {
+  formatDate,
+  numericId,
+  parseStatusFilter,
+  preorderStatus,
+  shipDateHint,
+} from "../preorder";
 import type { ProductSummary, StatusFilter, Variant } from "../preorder";
 import type { loader as productLoader } from "./app.products.$id";
 import {
@@ -40,16 +47,25 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   const url = new URL(request.url);
   const status = parseStatusFilter(url.searchParams.get("status"));
-  const [products, counts] = await Promise.all([
+  const overduePromise = getOverdueVariants(admin);
+  const countsPromise = getPreorderCounts(admin);
+  // The overdue filter needs the overdue products before listing.
+  const overdueProductIds =
+    status === "overdue"
+      ? [...new Set((await overduePromise).variants.map((v) => v.productId))]
+      : undefined;
+  const [products, counts, overdue] = await Promise.all([
     listProducts(admin, {
       search: url.searchParams.get("q"),
       status,
+      overdueProductIds,
       after: url.searchParams.get("after"),
       before: url.searchParams.get("before"),
     }),
-    getPreorderCounts(admin),
+    countsPromise,
+    overduePromise,
   ]);
-  return { products, counts, status };
+  return { products, counts, status, overdue };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -89,7 +105,7 @@ type SavedValues = Record<string, { isPreorder: boolean; shipDate: string }>;
 const SAVE_BAR_ID = "variants-save-bar";
 
 export default function ProductsPage() {
-  const { products, counts, status } = useLoaderData<typeof loader>();
+  const { products, counts, status, overdue } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -208,7 +224,45 @@ export default function ProductsPage() {
         </s-banner>
       )}
 
-      <StatGrid>
+      {overdue.variants.length > 0 && status !== "overdue" && (
+        <s-banner
+          tone="critical"
+          heading={`${overdue.variants.length} pre-order variant${
+            overdue.variants.length === 1 ? " is" : "s are"
+          } past the ship date`}
+        >
+          <s-paragraph>
+            Turn them off or pick a new ship date so customers see the right
+            information.
+          </s-paragraph>
+          <s-unordered-list>
+            {overdue.variants.slice(0, 5).map((v) => (
+              <s-list-item key={v.id}>
+                {v.productTitle} / {v.title} — was due {formatDate(v.shipDate)}{" "}
+                ({shipDateHint(v.shipDate)?.label.toLowerCase()})
+              </s-list-item>
+            ))}
+            {overdue.variants.length > 5 && (
+              <s-list-item>…and {overdue.variants.length - 5} more</s-list-item>
+            )}
+          </s-unordered-list>
+          <s-button
+            slot="secondary-actions"
+            onClick={() => setStatus("overdue")}
+          >
+            Review overdue
+          </s-button>
+        </s-banner>
+      )}
+
+      {status === "overdue" && overdue.variants.length > 0 && (
+        <s-banner tone="info" heading="Reviewing overdue pre-orders">
+          Overdue variants are marked in red below. Turn them off or pick a new
+          ship date, then click Save.
+        </s-banner>
+      )}
+
+      <StatGrid columns={5}>
         <StatCard
           label="All products"
           value={counts.total}
@@ -243,6 +297,19 @@ export default function ProductsPage() {
           selected={status === "none"}
           share={share(notOnPreorder)}
           onClick={() => setStatus("none")}
+        />
+        <StatCard
+          label="Overdue"
+          value={overdue.variants.length}
+          icon="alert-triangle"
+          tone={overdue.variants.length ? "critical" : "success"}
+          selected={status === "overdue"}
+          caption={
+            overdue.variants.length
+              ? "Ship date passed"
+              : "All ship dates on track"
+          }
+          onClick={() => setStatus("overdue")}
         />
       </StatGrid>
 
@@ -284,18 +351,26 @@ export default function ProductsPage() {
                 savedValues={savedValues}
                 resetKey={resetKey}
                 onChange={updateChange}
+                defaultOpen={status === "overdue"}
               />
             ))}
           </s-table-body>
         </s-table>
-        {products.nodes.length === 0 && (
-          <EmptyState icon="search" heading="No products found">
-            <s-text color="subdued">
-              Try a different search
-              {status !== "all" ? " or clear the filter" : ""}.
-            </s-text>
-          </EmptyState>
-        )}
+        {products.nodes.length === 0 &&
+          (status === "overdue" ? (
+            <EmptyState icon="check-circle" heading="Nothing overdue">
+              <s-text color="subdued">
+                Every pre-order variant has an upcoming ship date.
+              </s-text>
+            </EmptyState>
+          ) : (
+            <EmptyState icon="search" heading="No products found">
+              <s-text color="subdued">
+                Try a different search
+                {status !== "all" ? " or clear the filter" : ""}.
+              </s-text>
+            </EmptyState>
+          ))}
       </s-section>
       <Pager pageInfo={products.pageInfo} />
     </s-page>
@@ -348,14 +423,16 @@ function ProductRows({
   savedValues,
   resetKey,
   onChange,
+  defaultOpen = false,
 }: {
   product: ProductSummary;
   changes: Changes;
   savedValues: SavedValues;
   resetKey: number;
   onChange: (variant: Variant, change: Change | null) => void;
+  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const fetcher = useFetcher<typeof productLoader>();
   const navigate = useNavigate();
   const productUrl = `/app/products/${numericId(product.id)}`;
@@ -364,11 +441,15 @@ function ProductRows({
     (c) => c.productId === product.id,
   ).length;
 
-  const toggle = () => {
-    if (!open && !fetcher.data && fetcher.state === "idle")
+  // Load variants the first time the row is open (on click, or straight
+  // away when it starts open).
+  useEffect(() => {
+    if (open && !fetcher.data && fetcher.state === "idle") {
       fetcher.load(productUrl);
-    setOpen(!open);
-  };
+    }
+  }, [open, fetcher, productUrl]);
+
+  const toggle = () => setOpen(!open);
 
   return (
     <>
@@ -561,6 +642,11 @@ function VariantRow({
           />
           {change ? (
             <s-badge tone="caution">Unsaved</s-badge>
+          ) : saved.isPreorder &&
+            shipDateHint(saved.shipDate)?.tone === "critical" ? (
+            <s-badge tone="critical" icon="alert-triangle">
+              Overdue
+            </s-badge>
           ) : saved.isPreorder ? (
             <s-badge tone="success">Pre-order</s-badge>
           ) : (

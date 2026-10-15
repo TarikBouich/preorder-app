@@ -16,6 +16,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
   deactivateProduct,
+  getOverdueVariants,
   getPreorderCounts,
   listPreorderProducts,
 } from "../preorder.server";
@@ -43,15 +44,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const param = url.searchParams.get("status");
   const status = param === "active" || param === "inactive" ? param : undefined;
-  const [products, counts] = await Promise.all([
+  const [products, counts, overdue] = await Promise.all([
     listPreorderProducts(admin, {
       status,
       after: url.searchParams.get("after"),
       before: url.searchParams.get("before"),
     }),
     getPreorderCounts(admin),
+    getOverdueVariants(admin),
   ]);
-  return { products, counts, status: status ?? "all" };
+  return { products, counts, overdue, status: status ?? "all" };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -67,7 +69,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function PreordersPage() {
-  const { products, counts, status } = useLoaderData<typeof loader>();
+  const { products, counts, overdue, status } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -101,7 +103,7 @@ export default function PreordersPage() {
         Manage products
       </s-button>
 
-      <StatGrid columns={3}>
+      <StatGrid columns={4}>
         <StatCard
           label="Pre-order active"
           value={counts.active}
@@ -119,6 +121,18 @@ export default function PreordersPage() {
           selected={status === "inactive"}
           share={preorderTotal ? counts.inactive / preorderTotal : 0}
           onClick={() => setStatus("inactive")}
+        />
+        <StatCard
+          label="Overdue"
+          value={overdue.variants.length}
+          icon="alert-triangle"
+          tone={overdue.variants.length ? "critical" : "success"}
+          caption={
+            overdue.variants.length
+              ? "Review on Products page →"
+              : "All ship dates on track"
+          }
+          onClick={() => navigate("/app?status=overdue")}
         />
         <StatCard
           label="Next shipment"
@@ -212,9 +226,7 @@ function PreorderRow({ product }: { product: ProductWithVariants }) {
   const shopify = useAppBridge();
   const navigate = useNavigate();
   const status = preorderStatus(product.tags);
-  const preorderVariants = product.variants.filter(
-    (v) => v.isPreorder,
-  );
+  const preorderVariants = product.variants.filter((v) => v.isPreorder);
   const hiddenCount =
     (product.variantsCount?.count ?? 0) - product.variants.length;
   const busy = fetcher.state !== "idle";

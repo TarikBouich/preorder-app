@@ -56,13 +56,27 @@ export function numericId(gid: string) {
   return gid.split("/").pop()!;
 }
 
-export type StatusFilter = "all" | "active" | "inactive" | "none";
+export type StatusFilter = "all" | "active" | "inactive" | "none" | "overdue";
+
+const STATUS_FILTERS: StatusFilter[] = [
+  "active",
+  "inactive",
+  "none",
+  "overdue",
+];
 
 export function parseStatusFilter(value: string | null): StatusFilter {
-  return value === "active" || value === "inactive" || value === "none"
-    ? value
-    : "all";
+  return STATUS_FILTERS.find((f) => f === value) ?? "all";
 }
+
+// A pre-order variant whose ship date has already passed.
+export type OverdueVariant = {
+  id: string;
+  title: string;
+  shipDate: string;
+  productId: string;
+  productTitle: string;
+};
 
 export type PreorderCounts = {
   total: number;

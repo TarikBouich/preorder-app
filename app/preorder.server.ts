@@ -8,8 +8,10 @@ import {
   IS_PREORDER_KEY,
   METAFIELD_NAMESPACE,
   SHIP_DATE_KEY,
+  numericId,
 } from "./preorder";
 import type {
+  OverdueVariant,
   PageInfo,
   PreorderCounts,
   StatusFilter,
@@ -78,16 +80,26 @@ function toVariant(node: VariantNode): Variant {
 
 const STATUS_QUERIES: Record<StatusFilter, string | null> = {
   all: null,
+  overdue: null, // built from the overdue variants' product ids
   active: `tag:'${ACTIVE_TAG}'`,
   inactive: `tag:'${INACTIVE_TAG}'`,
   none: `-tag:'${ACTIVE_TAG}' -tag:'${INACTIVE_TAG}'`,
 };
 
+function idsQuery(productIds: string[]) {
+  // A query that matches nothing when there are no ids.
+  if (!productIds.length) return "id:0";
+  return productIds.map((id) => `id:${numericId(id)}`).join(" OR ");
+}
+
 function buildProductQuery(
   search?: string | null,
   status: StatusFilter = "all",
+  overdueProductIds: string[] = [],
 ) {
-  const parts = [search?.trim(), STATUS_QUERIES[status]].filter(Boolean);
+  const statusQuery =
+    status === "overdue" ? idsQuery(overdueProductIds) : STATUS_QUERIES[status];
+  const parts = [search?.trim(), statusQuery].filter(Boolean);
   return parts.length ? parts.map((p) => `(${p})`).join(" AND ") : null;
 }
 
@@ -113,13 +125,90 @@ export async function getPreorderCounts(admin: Admin): Promise<PreorderCounts> {
   };
 }
 
+// Today's date (YYYY-MM-DD) in the shop's time zone.
+function todayIn(timeZone: string) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+/**
+ * Pre-order variants whose ship date is before today (shop time zone).
+ * Only variants of products tagged as pre-order are checked, so this stays
+ * fast on large catalogs.
+ */
+export async function getOverdueVariants(
+  admin: Admin,
+): Promise<{ today: string; variants: OverdueVariant[] }> {
+  const query = `${STATUS_QUERIES.active} OR tag:'_status:pre-order'`;
+  const overdue: OverdueVariant[] = [];
+  let today = "";
+  let after: string | null = null;
+
+  // Up to 10 pages of 200 variants.
+  for (let page = 0; page < 10; page++) {
+    const data: {
+      shop: { ianaTimezone: string };
+      productVariants: {
+        nodes: (VariantNode & { product: { id: string; title: string } })[];
+        pageInfo: PageInfo;
+      };
+    } = await gql(
+      admin,
+      `#graphql
+      query overdueVariants($query: String!, $after: String) {
+        shop { ianaTimezone }
+        productVariants(first: 200, after: $after, query: $query) {
+          nodes {
+            id
+            title
+            isPreorder: metafield(namespace: "${METAFIELD_NAMESPACE}", key: "${IS_PREORDER_KEY}") { value }
+            shipDate: metafield(namespace: "${METAFIELD_NAMESPACE}", key: "${SHIP_DATE_KEY}") { value }
+            product { id title }
+          }
+          ${PAGE_INFO}
+        }
+      }`,
+      { query, after },
+    );
+
+    today ||= todayIn(data.shop.ianaTimezone || "UTC");
+    for (const v of data.productVariants.nodes) {
+      const shipDate = v.shipDate?.value;
+      if (v.isPreorder?.value === "true" && shipDate && shipDate < today) {
+        overdue.push({
+          id: v.id,
+          title: v.title,
+          shipDate,
+          productId: v.product.id,
+          productTitle: v.product.title,
+        });
+      }
+    }
+
+    if (!data.productVariants.pageInfo.hasNextPage) break;
+    after = data.productVariants.pageInfo.endCursor;
+  }
+
+  overdue.sort((a, b) => a.shipDate.localeCompare(b.shipDate));
+  return { today, variants: overdue };
+}
+
 export async function listProducts(
   admin: Admin,
   {
     search,
     status,
+    overdueProductIds,
     ...page
-  }: PageArgs & { search?: string | null; status?: StatusFilter },
+  }: PageArgs & {
+    search?: string | null;
+    status?: StatusFilter;
+    overdueProductIds?: string[];
+  },
 ) {
   const data = await gql<{ products: Connection<ProductSummary> }>(
     admin,
@@ -137,7 +226,10 @@ export async function listProducts(
         ${PAGE_INFO}
       }
     }`,
-    { ...pageVariables(25, page), query: buildProductQuery(search, status) },
+    {
+      ...pageVariables(25, page),
+      query: buildProductQuery(search, status, overdueProductIds),
+    },
   );
   return data.products;
 }
@@ -401,14 +493,14 @@ const METAFIELD_DEFINITIONS = [
     name: "Is Pre-Order",
     key: IS_PREORDER_KEY,
     type: "boolean",
-    description: "Variant is sold as pre-order (managed by preorder-neven).",
+    description: "Variant is sold as pre-order (managed by preorder-manager).",
   },
   {
     name: "Pre-Order Ship Date",
     key: SHIP_DATE_KEY,
     type: "date",
     description:
-      "Expected ship date for the pre-order (managed by preorder-neven).",
+      "Expected ship date for the pre-order (managed by preorder-manager).",
   },
 ];
 
