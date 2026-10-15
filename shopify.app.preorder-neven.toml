@@ -1,0 +1,30 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "0f0737f04820519f3b3733f916a30e85"
+application_url = "https://example.com"
+embedded = true
+name = "preorder-neven"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_products,write_products"
+
+[auth]
+redirect_urls = [ "https://example.com/api/auth" ]
+
+[webhooks]
+api_version = "2027-01"
+
+  # Handled by: /app/routes/webhooks.app.uninstalled.tsx
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  # Handled by: /app/routes/webhooks.app.scopes_update.tsx
+  [[webhooks.subscriptions]]
+  topics = [ "app/scopes_update" ]
+  uri = "/webhooks/app/scopes_update"
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true
