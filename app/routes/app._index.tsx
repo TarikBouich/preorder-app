@@ -14,35 +14,63 @@ import {
 import { SaveBar, useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { listProducts, saveVariants } from "../preorder.server";
+import {
+  getPreorderCounts,
+  listProducts,
+  saveVariantsAndSync,
+} from "../preorder.server";
 import type { VariantUpdate } from "../preorder.server";
-import { numericId, preorderStatus } from "../preorder";
-import type { ProductSummary, Variant } from "../preorder";
+import { numericId, parseStatusFilter, preorderStatus } from "../preorder";
+import type { ProductSummary, StatusFilter, Variant } from "../preorder";
 import type { loader as productLoader } from "./app.products.$id";
-import { Pager, ProductThumb, StatusBadge, useElementEvent } from "../components/ui";
+import {
+  EmptyState,
+  Pager,
+  ProductThumb,
+  ShipDateHint,
+  StatCard,
+  StatGrid,
+  StatusBadge,
+  StockBadge,
+  TagChips,
+  useElementEvent,
+} from "../components/ui";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   const url = new URL(request.url);
-  const products = await listProducts(admin, {
-    search: url.searchParams.get("q"),
-    after: url.searchParams.get("after"),
-    before: url.searchParams.get("before"),
-  });
-  return { products };
+  const status = parseStatusFilter(url.searchParams.get("status"));
+  const [products, counts] = await Promise.all([
+    listProducts(admin, {
+      search: url.searchParams.get("q"),
+      status,
+      after: url.searchParams.get("after"),
+      before: url.searchParams.get("before"),
+    }),
+    getPreorderCounts(admin),
+  ]);
+  return { products, counts, status };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   const form = await request.formData();
-  const updates = JSON.parse(String(form.get("updates") ?? "[]")) as VariantUpdate[];
+  const updates = JSON.parse(
+    String(form.get("updates") ?? "[]"),
+  ) as VariantUpdate[];
 
   if (updates.some((u) => u.isPreorder && !u.shipDate)) {
-    return { ok: false, message: "Pick a ship date for every pre-order variant" };
+    return {
+      ok: false,
+      message: "Pick a ship date for every pre-order variant",
+    };
   }
   try {
-    await saveVariants(admin, updates);
-    return { ok: true, message: `Saved ${updates.length} variant${updates.length === 1 ? "" : "s"}` };
+    await saveVariantsAndSync(admin, updates);
+    return {
+      ok: true,
+      message: `Saved ${updates.length} variant${updates.length === 1 ? "" : "s"}`,
+    };
   } catch (error) {
     return { ok: false, message: (error as Error).message };
   }
@@ -61,8 +89,25 @@ type SavedValues = Record<string, { isPreorder: boolean; shipDate: string }>;
 const SAVE_BAR_ID = "variants-save-bar";
 
 export default function ProductsPage() {
-  const { products } = useLoaderData<typeof loader>();
+  const { products, counts, status } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
+  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+
+  const notOnPreorder = Math.max(
+    counts.total - counts.active - counts.inactive,
+    0,
+  );
+  const share = (n: number) => (counts.total ? n / counts.total : 0);
+
+  const setStatus = (next: StatusFilter) => {
+    const nextParams = new URLSearchParams(params);
+    nextParams.delete("after");
+    nextParams.delete("before");
+    if (next === "all" || next === status) nextParams.delete("status");
+    else nextParams.set("status", next);
+    setParams(nextParams, { replace: true });
+  };
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
 
@@ -78,14 +123,17 @@ export default function ProductsPage() {
   const missingDate = changed.filter(([, c]) => c.isPreorder && !c.shipDate);
   const saving = fetcher.state !== "idle";
 
-  const updateChange = useCallback((variant: Variant, change: Change | null) => {
-    setChanges((current) => {
-      const next = { ...current };
-      if (change) next[variant.id] = change;
-      else delete next[variant.id];
-      return next;
-    });
-  }, []);
+  const updateChange = useCallback(
+    (variant: Variant, change: Change | null) => {
+      setChanges((current) => {
+        const next = { ...current };
+        if (change) next[variant.id] = change;
+        else delete next[variant.id];
+        return next;
+      });
+    },
+    [],
+  );
 
   const save = () => {
     if (missingDate.length) return;
@@ -110,7 +158,11 @@ export default function ProductsPage() {
 
   // A successful save makes the fresh loader data the new baseline.
   const [handledSave, setHandledSave] = useState<unknown>(null);
-  if (fetcher.state === "idle" && fetcher.data?.ok && handledSave !== fetcher.data) {
+  if (
+    fetcher.state === "idle" &&
+    fetcher.data?.ok &&
+    handledSave !== fetcher.data
+  ) {
     setHandledSave(fetcher.data);
     setSavedValues((current) => {
       const next = { ...current };
@@ -124,7 +176,15 @@ export default function ProductsPage() {
   }
 
   return (
-    <s-page heading="Products">
+    <s-page heading="Pre-order manager">
+      <s-button
+        slot="secondary-actions"
+        icon="calendar"
+        onClick={() => navigate("/app/preorders")}
+      >
+        View pre-orders
+      </s-button>
+
       <SaveBar id={SAVE_BAR_ID} open={changed.length > 0}>
         <button
           variant="primary"
@@ -148,15 +208,71 @@ export default function ProductsPage() {
         </s-banner>
       )}
 
+      <StatGrid>
+        <StatCard
+          label="All products"
+          value={counts.total}
+          icon="product"
+          selected={status === "all"}
+          caption="Your whole catalog"
+          onClick={() => setStatus("all")}
+        />
+        <StatCard
+          label="Pre-order active"
+          value={counts.active}
+          icon="calendar-check"
+          tone="success"
+          selected={status === "active"}
+          share={share(counts.active)}
+          onClick={() => setStatus("active")}
+        />
+        <StatCard
+          label="Inactive"
+          value={counts.inactive}
+          icon="pause-circle"
+          tone="neutral"
+          selected={status === "inactive"}
+          share={share(counts.inactive)}
+          onClick={() => setStatus("inactive")}
+        />
+        <StatCard
+          label="Not on pre-order"
+          value={notOnPreorder}
+          icon="circle-dashed"
+          tone="info"
+          selected={status === "none"}
+          share={share(notOnPreorder)}
+          onClick={() => setStatus("none")}
+        />
+      </StatGrid>
+
       <s-section padding="none">
         <s-table variant="auto" loading={navigation.state === "loading"}>
-          <SearchBox />
+          <s-stack
+            slot="filters"
+            direction="inline"
+            gap="small"
+            alignItems="center"
+          >
+            <s-box inlineSize="100%" maxInlineSize="480px">
+              <SearchBox />
+            </s-box>
+            {status !== "all" && (
+              <s-button
+                variant="tertiary"
+                icon="x"
+                onClick={() => setStatus("all")}
+              >
+                Clear filter
+              </s-button>
+            )}
+          </s-stack>
           <s-table-header-row>
             <s-table-header listSlot="primary">Product</s-table-header>
             <s-table-header listSlot="inline">Pre-order</s-table-header>
             <s-table-header>Ship date</s-table-header>
-            <s-table-header>Variants / stock</s-table-header>
-            <s-table-header>Tags / SKU</s-table-header>
+            <s-table-header>Inventory</s-table-header>
+            <s-table-header>Tags</s-table-header>
             <s-table-header></s-table-header>
           </s-table-header-row>
           <s-table-body>
@@ -172,12 +288,15 @@ export default function ProductsPage() {
             ))}
           </s-table-body>
         </s-table>
+        {products.nodes.length === 0 && (
+          <EmptyState icon="search" heading="No products found">
+            <s-text color="subdued">
+              Try a different search
+              {status !== "all" ? " or clear the filter" : ""}.
+            </s-text>
+          </EmptyState>
+        )}
       </s-section>
-      {products.nodes.length === 0 && (
-        <s-section>
-          <s-paragraph>No products found.</s-paragraph>
-        </s-section>
-      )}
       <Pager pageInfo={products.pageInfo} />
     </s-page>
   );
@@ -196,8 +315,11 @@ function SearchBox() {
         timer.current = setTimeout(() => {
           const query = el.value.trim();
           if (query === (params.get("q") ?? "")) return;
-          const next = new URLSearchParams();
+          const next = new URLSearchParams(params);
+          next.delete("after");
+          next.delete("before");
           if (query) next.set("q", query);
+          else next.delete("q");
           setParams(next, { replace: true });
         }, 300);
       },
@@ -210,7 +332,6 @@ function SearchBox() {
   return (
     <s-search-field
       ref={ref}
-      slot="filters"
       label="Search products"
       labelAccessibilityVisibility="exclusive"
       placeholder="Search by title, SKU, tag…"
@@ -239,10 +360,13 @@ function ProductRows({
   const navigate = useNavigate();
   const productUrl = `/app/products/${numericId(product.id)}`;
   const variants = fetcher.data?.product.variants;
-  const unsaved = Object.values(changes).filter((c) => c.productId === product.id).length;
+  const unsaved = Object.values(changes).filter(
+    (c) => c.productId === product.id,
+  ).length;
 
   const toggle = () => {
-    if (!open && !fetcher.data && fetcher.state === "idle") fetcher.load(productUrl);
+    if (!open && !fetcher.data && fetcher.state === "idle")
+      fetcher.load(productUrl);
     setOpen(!open);
   };
 
@@ -250,12 +374,34 @@ function ProductRows({
     <>
       <s-table-row>
         <s-table-cell>
-          <s-clickable onClick={toggle} accessibilityLabel={`Show variants of ${product.title}`}>
+          <s-clickable
+            onClick={toggle}
+            accessibilityLabel={`Show variants of ${product.title}`}
+          >
             <s-stack direction="inline" gap="small" alignItems="center">
-              <s-icon type={open ? "chevron-down" : "chevron-right"} />
+              <s-icon
+                type={open ? "chevron-down" : "chevron-right"}
+                color="subdued"
+              />
               <ProductThumb product={product} />
-              <s-text type="strong">{product.title}</s-text>
-              {unsaved > 0 && <s-badge tone="caution">{unsaved} unsaved</s-badge>}
+              <s-stack gap="small-500">
+                <s-stack direction="inline" gap="small-200" alignItems="center">
+                  <s-text type="strong">{product.title}</s-text>
+                  {product.status && product.status !== "ACTIVE" && (
+                    <s-badge size="base">
+                      {product.status.toLowerCase()}
+                    </s-badge>
+                  )}
+                  {unsaved > 0 && (
+                    <s-badge tone="caution">{unsaved} unsaved</s-badge>
+                  )}
+                </s-stack>
+                <s-text color="subdued">
+                  {open
+                    ? "Hide variants"
+                    : `${product.variantsCount?.count ?? 0} variants · click to manage`}
+                </s-text>
+              </s-stack>
             </s-stack>
           </s-clickable>
         </s-table-cell>
@@ -263,21 +409,33 @@ function ProductRows({
           <StatusBadge status={preorderStatus(product.tags)} />
         </s-table-cell>
         <s-table-cell></s-table-cell>
-        <s-table-cell>{product.variantsCount?.count ?? 0} variants</s-table-cell>
         <s-table-cell>
-          <s-text color="subdued">{product.tags.join(", ")}</s-text>
+          <s-text color="subdued">
+            {product.variantsCount?.count ?? 0} variants
+          </s-text>
         </s-table-cell>
         <s-table-cell>
-          <s-button variant="tertiary" icon="edit" onClick={() => navigate(productUrl)}>
-            Edit
-          </s-button>
+          <TagChips tags={product.tags} />
+        </s-table-cell>
+        <s-table-cell>
+          <s-button
+            variant="tertiary"
+            icon="edit"
+            accessibilityLabel={`Edit ${product.title}`}
+            onClick={() => navigate(productUrl)}
+          />
         </s-table-cell>
       </s-table-row>
 
       {open && !variants && (
         <s-table-row>
           <s-table-cell>
-            <s-stack direction="inline" gap="small" alignItems="center" paddingInlineStart="large-200">
+            <s-stack
+              direction="inline"
+              gap="small"
+              alignItems="center"
+              paddingInlineStart="large-200"
+            >
               <s-spinner size="base" accessibilityLabel="Loading variants" />
               <s-text color="subdued">Loading variants…</s-text>
             </s-stack>
@@ -299,7 +457,8 @@ function ProductRows({
             saved={
               savedValues[variant.id] ?? {
                 isPreorder: variant.isPreorder,
-                shipDate: variant.shipDate ?? "",
+                // Off variants show no date, even if an old one is stored.
+                shipDate: variant.isPreorder ? (variant.shipDate ?? "") : "",
               }
             }
             change={changes[variant.id]}
@@ -331,24 +490,29 @@ function VariantRow({
   const report = useCallback(
     (next: { isPreorder: boolean; shipDate: string }) => {
       const isSaved =
-        next.isPreorder === saved.isPreorder && next.shipDate === saved.shipDate;
+        next.isPreorder === saved.isPreorder &&
+        next.shipDate === saved.shipDate;
       onChange(
         variant,
         isSaved
           ? null
-          : { ...next, label: `${product.title} / ${variant.title}`, productId: product.id },
+          : {
+              ...next,
+              label: `${product.title} / ${variant.title}`,
+              productId: product.id,
+            },
       );
     },
-    [onChange, variant, saved.isPreorder, saved.shipDate, product.title, product.id],
+    [
+      onChange,
+      variant,
+      saved.isPreorder,
+      saved.shipDate,
+      product.title,
+      product.id,
+    ],
   );
 
-  const switchRef = useElementEvent<"s-switch">(
-    "change",
-    useCallback(
-      (el) => report({ isPreorder: el.checked, shipDate: current.shipDate }),
-      [report, current.shipDate],
-    ),
-  );
   const dateRef = useElementEvent<"s-date-field">(
     "change",
     useCallback(
@@ -357,12 +521,34 @@ function VariantRow({
     ),
   );
 
+  // Turning a variant off clears its ship date.
+  const switchRef = useElementEvent<"s-switch">(
+    "change",
+    useCallback(
+      (el) => {
+        if (!el.checked && dateRef.current) dateRef.current.value = "";
+        report({
+          isPreorder: el.checked,
+          shipDate: el.checked ? current.shipDate : "",
+        });
+      },
+      [report, current.shipDate, dateRef],
+    ),
+  );
+
   return (
     <s-table-row>
       <s-table-cell>
-        <s-box paddingInlineStart="large-300">
-          <s-text color="subdued">↳ </s-text>
-          {variant.title}
+        <s-box paddingInlineStart="large-500">
+          <s-stack direction="inline" gap="small-200" alignItems="center">
+            <s-icon type="variant" color="subdued" size="small" />
+            <s-stack gap="small-500">
+              <s-text>{variant.title}</s-text>
+              <s-text color="subdued">
+                {variant.sku ? `SKU ${variant.sku}` : "No SKU"}
+              </s-text>
+            </s-stack>
+          </s-stack>
         </s-box>
       </s-table-cell>
       <s-table-cell>
@@ -389,13 +575,17 @@ function VariantRow({
           labelAccessibilityVisibility="exclusive"
           placeholder="Pick a date"
           defaultValue={current.shipDate}
+          disabled={!current.isPreorder}
           error={needsDate ? "Ship date required" : undefined}
         />
+        {current.isPreorder && current.shipDate && (
+          <ShipDateHint date={current.shipDate} />
+        )}
       </s-table-cell>
-      <s-table-cell>{variant.inventoryQuantity ?? "—"} in stock</s-table-cell>
       <s-table-cell>
-        <s-text color="subdued">{variant.sku || "—"}</s-text>
+        <StockBadge quantity={variant.inventoryQuantity} />
       </s-table-cell>
+      <s-table-cell></s-table-cell>
       <s-table-cell></s-table-cell>
     </s-table-row>
   );

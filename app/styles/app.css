@@ -1,0 +1,152 @@
+/* preorder-neven app styles. Loaded via <link> in root.tsx so they are
+   present on the first server render. Classes are prefixed with pn-. */
+
+/* ---------- Stat cards ---------- */
+
+.pn-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (min-width: 900px) {
+  .pn-stat-grid {
+    grid-template-columns: repeat(var(--columns, 4), minmax(0, 1fr));
+  }
+}
+
+.pn-stat-card {
+  /* tone colours, overridden per tone below */
+  --accent: #5c6ac4;
+  --accent-soft: #f0f1fb;
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid #e3e3e3;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  text-align: left;
+  font: inherit;
+  color: #303030;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+}
+
+button.pn-stat-card {
+  cursor: pointer;
+}
+
+button.pn-stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+
+button.pn-stat-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.pn-stat-card[data-selected="true"] {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 6px 16px rgba(0, 0, 0, 0.06);
+}
+
+.pn-stat-card[data-tone="success"] {
+  --accent: #29845a;
+  --accent-soft: #e6f4ec;
+}
+.pn-stat-card[data-tone="neutral"] {
+  --accent: #6b7280;
+  --accent-soft: #f1f2f4;
+}
+.pn-stat-card[data-tone="info"] {
+  --accent: #2b6cd4;
+  --accent-soft: #e8f0fd;
+}
+.pn-stat-card[data-tone="caution"] {
+  --accent: #b98900;
+  --accent-soft: #fdf4dc;
+}
+.pn-stat-card[data-tone="critical"] {
+  --accent: #c53030;
+  --accent-soft: #fdecec;
+}
+
+.pn-stat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pn-stat-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pn-stat-check {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pn-stat-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pn-metric {
+  font-size: 1.75rem;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: #1a1a1a;
+}
+
+.pn-stat-label {
+  font-size: 0.8125rem;
+  color: #616161;
+}
+
+.pn-stat-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: #616161;
+}
+
+.pn-stat-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: #f1f1f1;
+  overflow: hidden;
+}
+
+.pn-stat-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}

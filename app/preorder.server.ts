@@ -11,6 +11,8 @@ import {
 } from "./preorder";
 import type {
   PageInfo,
+  PreorderCounts,
+  StatusFilter,
   ProductSummary,
   ProductWithVariants,
   Variant,
@@ -74,9 +76,50 @@ function toVariant(node: VariantNode): Variant {
   };
 }
 
+const STATUS_QUERIES: Record<StatusFilter, string | null> = {
+  all: null,
+  active: `tag:'${ACTIVE_TAG}'`,
+  inactive: `tag:'${INACTIVE_TAG}'`,
+  none: `-tag:'${ACTIVE_TAG}' -tag:'${INACTIVE_TAG}'`,
+};
+
+function buildProductQuery(
+  search?: string | null,
+  status: StatusFilter = "all",
+) {
+  const parts = [search?.trim(), STATUS_QUERIES[status]].filter(Boolean);
+  return parts.length ? parts.map((p) => `(${p})`).join(" AND ") : null;
+}
+
+export async function getPreorderCounts(admin: Admin): Promise<PreorderCounts> {
+  const data = await gql<{
+    total: { count: number };
+    active: { count: number };
+    inactive: { count: number };
+  }>(
+    admin,
+    `#graphql
+    query preorderCounts($active: String!, $inactive: String!) {
+      total: productsCount(limit: null) { count }
+      active: productsCount(query: $active, limit: null) { count }
+      inactive: productsCount(query: $inactive, limit: null) { count }
+    }`,
+    { active: STATUS_QUERIES.active, inactive: STATUS_QUERIES.inactive },
+  );
+  return {
+    total: data.total.count,
+    active: data.active.count,
+    inactive: data.inactive.count,
+  };
+}
+
 export async function listProducts(
   admin: Admin,
-  { search, ...page }: PageArgs & { search?: string | null },
+  {
+    search,
+    status,
+    ...page
+  }: PageArgs & { search?: string | null; status?: StatusFilter },
 ) {
   const data = await gql<{ products: Connection<ProductSummary> }>(
     admin,
@@ -94,17 +137,19 @@ export async function listProducts(
         ${PAGE_INFO}
       }
     }`,
-    { ...pageVariables(25, page), query: search || null },
+    { ...pageVariables(25, page), query: buildProductQuery(search, status) },
   );
   return data.products;
 }
 
 export async function listPreorderProducts(
   admin: Admin,
-  page: PageArgs,
+  { status, ...page }: PageArgs & { status?: "active" | "inactive" },
 ): Promise<Connection<ProductWithVariants>> {
   const data = await gql<{
-    products: Connection<ProductSummary & { variants: { nodes: VariantNode[] } }>;
+    products: Connection<
+      ProductSummary & { variants: { nodes: VariantNode[] } }
+    >;
   }>(
     admin,
     `#graphql
@@ -123,7 +168,9 @@ export async function listPreorderProducts(
     }`,
     {
       ...pageVariables(10, page),
-      query: `tag:'${ACTIVE_TAG}' OR tag:'${INACTIVE_TAG}'`,
+      query: status
+        ? STATUS_QUERIES[status]
+        : `${STATUS_QUERIES.active} OR ${STATUS_QUERIES.inactive}`,
     },
   );
   return {
@@ -195,7 +242,11 @@ export type VariantUpdate = {
   shipDate: string | null;
 };
 
-export async function saveVariants(admin: Admin, updates: VariantUpdate[]) {
+export async function saveVariants(admin: Admin, input: VariantUpdate[]) {
+  // A variant that isn't on pre-order has no ship date.
+  const updates = input.map((v) =>
+    v.isPreorder ? v : { ...v, shipDate: null },
+  );
   const toSet = updates.flatMap((v) => [
     {
       ownerId: v.id,
@@ -260,50 +311,89 @@ function swapTags(tags: string[], from: string, to: string) {
 }
 
 /**
- * Deactivate: `_x:true` tags become `_x:false` and every variant's
- * Is Pre-Order is set to false. Ship dates are kept so a later
- * activation knows which variants were on pre-order.
+ * Switches the product's pre-order tags to `:true` (active) or `:false`.
+ * With `addIfMissing`, `_pre_order:true/false` is added when no tag was swapped.
+ */
+async function setPreorderTags(
+  admin: Admin,
+  id: string,
+  tags: string[],
+  active: boolean,
+  addIfMissing: boolean,
+) {
+  const swaps = active
+    ? swapTags(tags, "false", "true")
+    : swapTags(tags, "true", "false");
+  const target = active ? ACTIVE_TAG : INACTIVE_TAG;
+  const toAdd = swaps.map((s) => s.to);
+  if (addIfMissing && !tags.includes(target) && !toAdd.includes(target)) {
+    toAdd.push(target);
+  }
+  await addTags(admin, id, toAdd);
+  await removeTags(
+    admin,
+    id,
+    swaps.map((s) => s.from),
+  );
+}
+
+/**
+ * Keeps product tags in line with the variants: any variant on pre-order makes
+ * the product active; when the last one is turned off the tags go to `:false`.
+ */
+export async function syncPreorderTags(admin: Admin, productIds: string[]) {
+  for (const id of productIds) {
+    const product = await getProduct(admin, id);
+    if (!product) continue;
+    const anyOn = product.variants.some((v) => v.isPreorder);
+    if (anyOn) {
+      await setPreorderTags(admin, id, product.tags, true, true);
+    } else {
+      await setPreorderTags(admin, id, product.tags, false, false);
+    }
+  }
+}
+
+/** Saves variant metafields, then syncs the tags of every product touched. */
+export async function saveVariantsAndSync(
+  admin: Admin,
+  updates: VariantUpdate[],
+) {
+  if (!updates.length) return;
+  const data = await gql<{
+    nodes: ({ product: { id: string } } | null)[];
+  }>(
+    admin,
+    `#graphql
+    query variantProducts($ids: [ID!]!) {
+      nodes(ids: $ids) { ... on ProductVariant { product { id } } }
+    }`,
+    { ids: updates.map((u) => u.id) },
+  );
+  const productIds = [
+    ...new Set(data.nodes.map((n) => n?.product?.id).filter(Boolean)),
+  ] as string[];
+
+  await saveVariants(admin, updates);
+  await syncPreorderTags(admin, productIds);
+}
+
+/**
+ * Deactivate: every variant is turned off (which clears its ship date) and
+ * `_x:true` tags become `_x:false`. To activate again, turn variants back on
+ * with a ship date — saving them switches the tags back automatically.
  */
 export async function deactivateProduct(admin: Admin, id: string) {
   const product = await getProduct(admin, id);
   if (!product) throw new Error("Product not found");
 
-  const swaps = swapTags(product.tags, "true", "false");
-  await addTags(admin, id, swaps.map((s) => s.to));
-  await removeTags(admin, id, swaps.map((s) => s.from));
-  if (!product.tags.includes(INACTIVE_TAG) && !swaps.length) {
-    await addTags(admin, id, [INACTIVE_TAG]);
-  }
-
   await saveVariants(
     admin,
     product.variants
-      .filter((v) => v.isPreorder)
-      .map((v) => ({ id: v.id, isPreorder: false, shipDate: v.shipDate })),
+      .filter((v) => v.isPreorder || v.shipDate)
+      .map((v) => ({ id: v.id, isPreorder: false, shipDate: null })),
   );
-}
-
-/**
- * Activate: `_x:false` tags become `_x:true` and variants that still have a
- * ship date get Is Pre-Order set back to true.
- */
-export async function activateProduct(admin: Admin, id: string) {
-  const product = await getProduct(admin, id);
-  if (!product) throw new Error("Product not found");
-
-  const swaps = swapTags(product.tags, "false", "true");
-  await addTags(admin, id, swaps.map((s) => s.to));
-  await removeTags(admin, id, swaps.map((s) => s.from));
-  if (!product.tags.includes(ACTIVE_TAG) && !swaps.length) {
-    await addTags(admin, id, [ACTIVE_TAG]);
-  }
-
-  await saveVariants(
-    admin,
-    product.variants
-      .filter((v) => !v.isPreorder && v.shipDate)
-      .map((v) => ({ id: v.id, isPreorder: true, shipDate: v.shipDate })),
-  );
+  await setPreorderTags(admin, id, product.tags, false, true);
 }
 
 const METAFIELD_DEFINITIONS = [
@@ -317,7 +407,8 @@ const METAFIELD_DEFINITIONS = [
     name: "Pre-Order Ship Date",
     key: SHIP_DATE_KEY,
     type: "date",
-    description: "Expected ship date for the pre-order (managed by preorder-neven).",
+    description:
+      "Expected ship date for the pre-order (managed by preorder-neven).",
   },
 ];
 
@@ -332,7 +423,9 @@ export async function ensureMetafieldDefinitions(admin: Admin, shop: string) {
 
   for (const definition of METAFIELD_DEFINITIONS) {
     const data = await gql<{
-      metafieldDefinitionCreate: { userErrors: { message: string; code: string }[] };
+      metafieldDefinitionCreate: {
+        userErrors: { message: string; code: string }[];
+      };
     }>(
       admin,
       `#graphql

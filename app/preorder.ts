@@ -55,3 +55,54 @@ export function productGid(id: string) {
 export function numericId(gid: string) {
   return gid.split("/").pop()!;
 }
+
+export type StatusFilter = "all" | "active" | "inactive" | "none";
+
+export function parseStatusFilter(value: string | null): StatusFilter {
+  return value === "active" || value === "inactive" || value === "none"
+    ? value
+    : "all";
+}
+
+export type PreorderCounts = {
+  total: number;
+  active: number;
+  inactive: number;
+};
+
+type Tone = "success" | "caution" | "critical" | "neutral" | "info";
+
+// "in 12 days" / "Tomorrow" / "Overdue by 3 days" for a YYYY-MM-DD ship date.
+export function shipDateHint(
+  date: string | null,
+): { label: string; tone: Tone } | null {
+  if (!date) return null;
+  const today = new Date();
+  const todayUtc = Date.UTC(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+  );
+  const [y, m, d] = date.split("-").map(Number);
+  const days = Math.round((Date.UTC(y, m - 1, d) - todayUtc) / 86_400_000);
+
+  if (days < 0)
+    return {
+      label: `Overdue by ${-days} day${days === -1 ? "" : "s"}`,
+      tone: "critical",
+    };
+  if (days === 0) return { label: "Ships today", tone: "caution" };
+  if (days === 1) return { label: "Tomorrow", tone: "caution" };
+  if (days <= 7) return { label: `in ${days} days`, tone: "caution" };
+  return { label: `in ${days} days`, tone: "success" };
+}
+
+export function formatDate(date: string) {
+  const [y, m, d] = date.split("-").map(Number);
+  // Fixed locale so server and browser render the same text.
+  return new Date(y, m - 1, d).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
