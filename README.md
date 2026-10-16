@@ -47,6 +47,23 @@ Code map:
 
 Checks: `npm run typecheck && npm run lint && npm run build`
 
+## Production (Netlify + Neon)
+
+- Hosting: Netlify free plan (`netlify.toml`). The server runs as one Netlify Function.
+- Database: Neon Postgres. It stores only Shopify sessions (`prisma/schema.prisma`).
+- Shopify app: `shopify.app.production.toml` → https://preorder-manager.netlify.app
+
+Netlify deploys **only from the `production` branch**, because each deploy uses free-plan credits. To release:
+
+```bash
+git push origin main:production          # deploy the current main
+shopify app deploy --config production   # only when the app config changed
+```
+
+Netlify environment variables: `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SHOPIFY_APP_URL`, `SCOPES`, `DATABASE_URL`, `DIRECT_URL`.
+
+Local dev needs a `.env` pointing at the Neon `dev` branch (see `.env.example`).
+
 ## Versions
 
 Git tags mark approved versions: `v0.1-working`, `v0.2-modern-ui`.

@@ -3,6 +3,8 @@
 
 generator client {
   provider = "prisma-client-js"
+  // "native" for local dev; rhel-openssl-3.0.x for Netlify Functions (AWS Lambda).
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 // Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long

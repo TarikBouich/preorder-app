@@ -1,0 +1,19 @@
+# Netlify (free plan). Production deploys only from the `production` branch,
+# so everyday pushes to `main` don't use deploy credits.
+# Site settings → Build & deploy → Branches → Production branch: production
+
+[build]
+  # Apply database migrations (needs DIRECT_URL), then build the app.
+  command = "npx prisma migrate deploy && npm run build"
+  publish = "build/client"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  # Prisma's Linux query engine is loaded dynamically; make sure it ships
+  # with the server function.
+  included_files = [
+    "node_modules/.prisma/client/libquery_engine-rhel-openssl-3.0.x.so.node",
+    "node_modules/.prisma/client/schema.prisma",
+  ]
