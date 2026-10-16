@@ -9,6 +9,10 @@
 
 [build.environment]
   NODE_VERSION = "22"
+  # These values are public (the Client ID is in shopify.app.production.toml
+  # by design). Real secrets — SHOPIFY_API_SECRET, DATABASE_URL, DIRECT_URL —
+  # are still scanned.
+  SECRETS_SCAN_OMIT_KEYS = "SHOPIFY_API_KEY,SHOPIFY_APP_URL,SCOPES"
 
 [functions]
   # Prisma's Linux query engine is loaded dynamically; make sure it ships
