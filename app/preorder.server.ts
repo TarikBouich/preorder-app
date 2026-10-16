@@ -506,14 +506,33 @@ const METAFIELD_DEFINITIONS = [
 
 const checkedShops = new Set<string>();
 
+async function definitionExists(admin: Admin, key: string) {
+  const data = await gql<{
+    metafieldDefinitions: { nodes: { id: string }[] };
+  }>(
+    admin,
+    `#graphql
+    query preorderDefinitionExists($namespace: String!, $key: String!) {
+      metafieldDefinitions(first: 1, ownerType: PRODUCTVARIANT, namespace: $namespace, key: $key) {
+        nodes { id }
+      }
+    }`,
+    { namespace: METAFIELD_NAMESPACE, key },
+  );
+  return data.metafieldDefinitions.nodes.length > 0;
+}
+
 /**
- * Creates the variant metafield definitions the app and theme rely on.
- * Definitions that already exist on the store are left untouched.
+ * Makes sure the variant metafield definitions the app and theme rely on
+ * exist. Each one is looked up first and only created when missing; an
+ * existing definition (name, type, settings, values) is never modified.
  */
 export async function ensureMetafieldDefinitions(admin: Admin, shop: string) {
   if (checkedShops.has(shop)) return;
 
   for (const definition of METAFIELD_DEFINITIONS) {
+    if (await definitionExists(admin, definition.key)) continue;
+
     const data = await gql<{
       metafieldDefinitionCreate: {
         userErrors: { message: string; code: string }[];
@@ -535,6 +554,7 @@ export async function ensureMetafieldDefinitions(admin: Admin, shop: string) {
         },
       },
     );
+    // TAKEN = created meanwhile (e.g. two requests at once); nothing to do.
     const errors = data.metafieldDefinitionCreate.userErrors.filter(
       (e) => e.code !== "TAKEN",
     );
